@@ -1,0 +1,663 @@
+<XML ID="{4AE0010F-B62D-4A27-B137-74F578498072}" Type="Bots">
+	<data Code="Bank Reconciliation BOT " ID="{C955A0D0-BF7D-4D4B-AF33-999BA85C0EEC}">
+		<Name Value="Bank Reconciliation BOT "/>
+		<Description Value="Bank Reconciliation QBO "/>
+		<MacroType Value="Record Loop"/>
+		<EnableResults Value="True"/>
+		<Shortcut/>
+		<RecordType/>
+		<RunFrom Value="Bank Statements (Bank Reconciliation)">
+			<item Code="Bank Statements (Bank Reconciliation)" ID="{CC93E67E-7110-4319-AD99-E61449437D00}" Assigned="True"/>
+		</RunFrom>
+		<Using/>
+		<MacroScript>' Macro Name: Bank Reconciliation
+' Version 1.0
+' Author: Marvin Crossnoe
+' Date:  2016-12-17
+'
+'
+' Description: Reconcile transactions in BankRec from downloaded bank file 
+
+' Update History:
+'  
+'
+' Macro Type:      Record Loop
+' Enable Results:  unchecked
+' Record Type:     N/A
+' Run From:        Bank Statement HD pane (only one selected) or Bank Statement Form
+' Using:           blank
+'
+' Why to use:      	You need an automated way to reconcile bank statement items and move from the Outstanding
+'					(unreconciled) tab to the Reconciled tab. 
+'
+' How to use:     	1) Download one of these files from bank:
+'					(OFX-Microsoft Money, QBO-Quickbooks , QFX-Quicken). These files are all similar and use the OFX standard.
+'					2) Run bot from the Bank Statements form or the Bank Statement HD pane (only a single statement selected). 
+'					It will ask for the downloaded 	bank file, and then process all deposits, debit card and bank draft 
+'					transactions. For each check, it will attempt to locate the check number and verify the amount. For each
+'					deposit and debit card transaction it will locate the item by amount and attempt to clear. If the same amount
+'					is found on two different bank items, it will not clear either one. You will need to clear these items manually.
+'					The total checks (and debit card amounts) and the total deposits are calculated by the Bot and placed in the
+'					appropriate fields on the "bank statement" form. 
+'					3) There is a spreadsheet built during the processing of each item in the downloaded bank file. This spreadsheet
+'					is attached to the statement at the end of processing all items. You can use this spreadsheet to investigate 
+'					what the Bot did with each transaction and why. 
+'					4) The downloaded bank transaction file is also attached to the bank statement and is deleted from the file 
+'					system. 
+'					5) if you attempt to run the bank reconciliation a second time, then the Bot will use the downloaded file that is 
+'					attached to the statement and will NOT ask for the bank download file. If you want to force the Bot to use a
+'					different download file, then delete the attached download file.
+'
+' See also:        	Bank Un-Reconciliation BOT. this will reverse all reconciled items and clear the total deposits and checks fields
+'					and delete the attachments.
+'
+' Cautions			This has been tested specifically with the downloaded files from Peoples
+'					Bank - Lubbock. Other files may require some tweaking if the file format
+'					is not the same. 
+'					There is no checking done to prohibit running the Bot multiple times for the same 
+'					bank statement download. If this is done, then the duplicates can be deleted from
+'					the "New" journal entries prior to merging.
+ 
+' Improvements		1) This could be extended to "post" the interest payments from the download file and other items. There is another 
+'					related Bot that posts debit card and deposit transactions using the same bank download file: "Process Deposit 
+'					and Debit Card Transactions".
+'					2) This could be extended to use other download files that use the OFX standards.
+' ----------------------------------------------------------------------------------------
+
+'Option Explicit
+Dim Internal
+Internal = True
+
+Dim MyActivity 'As ActivityOAS.Activity
+Dim MyBRStatement  'as ActivityOAS.BRStatement
+Dim MyBRTransaction 'as ActivityOAS.BRTransaction
+Dim Company
+'====================================================================================
+If(Internal) Then
+	' --This Section Is For Internal run only
+	Set MyBRStatement = RecordLoop.Data	
+	Set Company = RecordLoop.Company
+	'make sure only ONE Statement is selected.
+	If RecordLoop.ItemCount &lt;&gt; 1 Then   
+		'Call Err.Raise (61000,"RecordLoop", "This BOT can operate only on a single Bank Statement")
+		DisplayMessage "This BOT can operate on only a single Bank Statement",False
+		Err.Create
+	End If
+Else
+	' -- This section is for external run only
+	Set MyActivity = CreateObject("ActivityOAS.Activity")
+	MyActivity.ServerAddress = "Appserver3"
+	Set Company = MyActivity.Companies("Demo MRC")
+	Company.Connect
+	Set MyBRStatement = Company.BankReconciliation.BRStatement
+	MyBRStatement.Locate("MRXNO Peoples Bank - 2016-11-30")
+End If
+
+'====================================================================================
+Set MyBRTransaction = Company.BankReconciliation.BRTransaction
+
+Dim ExitFlag 
+Dim ExitDescription
+Dim DRAmount			'calculated Debit Amount from download file
+Dim CRAmount			'calculated Credit Amount from download file
+Dim StatementGLDate		'GL date on the Activity Statement
+Dim DTSTART				'DTSTART is found in download file
+Dim DTEND				'DTEBD is found in download file
+Dim BRBankAccountName	'Activity Bank Account NAME derived from Activity Statement
+Dim BRABANumber			'Activity Account NUMBER derived from Actiivity Statement
+Dim BRBankName			'Activity Bank Name derived from Activity Statement
+Dim BRBankRoutingNumber	'Activity Bank Routing Number derived from Activity Statement
+Dim DownloadFilename	'download file name as stored on Statement
+Dim varInFileFlag		'flag for varInFile to determine whether the input file is read from Activity or file system
+Dim varInFile			'download file name as read from file system
+Dim strOFX				'string associated with the download file TextStream
+Dim objRE				'as  vbscript		regular expression object
+Dim colMatch			'collection of matched regular expression
+Dim strMatch			'individual strings of Matched items 
+Dim BalanceDate			'date found in download file 
+Dim BankID_RoutingNumber				'bank rounting number found in download file
+Dim AccountID			'account number found in download file
+Dim colMatchesSTMTTRN	'collection of matched "&lt;STMTTRN&gt;.*?&lt;\/STMTTRN&gt;"
+Dim STMTTRNMatch		'individual strings of "&lt;STMTTRN&gt;.*?&lt;\/STMTTRN&gt;" matched items
+Dim ItemCount			'number of "&lt;STMTTRN&gt;.*?&lt;\/STMTTRN&gt;" lines in download file
+Dim DisplayFreq			'variable that determines how often the display is updated with the count of items processed
+Dim ItemsProcessed		'counter of items processed that works with DisplayFreq to determine when to update counter
+Dim Charges				'total charges (checks, debits) from bank download file used to update Activity Statement
+Dim Deposits			'total deposits from bank download file used to update Activity Statement
+
+
+DrAmount = CCur(0)
+CrAmount = CCur(0)
+ExitFlag = 0
+ItemsProcessed = 0
+'-----------------------------------------------------------------------------------
+'-- Make sure that the statement is not closed and we can write to it.
+
+Call IsStatementClosed(MyBRStatement,ExitFlag,ExitDescription)
+Call IsStatementLocked(MyBRStatement,ExitFlag,ExitDescription)
+
+
+If(ExitFlag = 0) Then   ' ExitFlag is non zero if the statement is locked or closed
+	'get the GL Date on the Statement so we can check that each transaction is in the proper time frame
+	StatementGLDate = MyBRStatement.GLDate   
+	'In this section, we take the context of the bank statement and derive the Account ID 
+	'and Bank ID so we can make sure that the file downloaded from the bank matches
+	
+	' -- Get Bank Account Name from the Statement
+	BRBankAccountName = MyBRStatement.BankAccount
+	' -- Now use this name to find the ABN Number from the Bank Account table
+	Dim MyBRAccount 'as ActivityOAS.BRAccount
+	Dim MyBRBank 'as ActivityOAS.BRBank
+	
+	Set MyBRAccount = Company.BankReconciliation.BRAccount
+	MyBRAccount.Locate(BRBankAccountName)
+	BRABANumber = MyBRAccount.Fields("AccountNumber").Value
+	BRABANumber = Trim(BRABANumber)
+	BRABANumber = CStr(RemoveLeadingZeroes(BRABANumber))
+	BRBankName = MyBRAccount.Fields("BRBank").Value
+	
+	' -- Now use the Account Name to locate the Bank Routing Number from Activity
+	
+	Set MyBRBank = Company.BankReconciliation.BRBank
+	MyBRBank.Locate(BRBankName)
+	BRBankRoutingNumber = MyBRBank.Fields("ABANumber").Value
+	BRBankRoutingNumber = Trim(BRBankRoutingNumber)
+	BRBankRoutingNumber = CStr(RemoveLeadingZeroes(BRBankRoutingNumber))
+	
+	Set MyBRAccount = Nothing
+	Set MyBRBank = Nothing
+	'-----------------------------------------------------------------------------------
+	'--	In This Section, we set up the spreadsheet to collect the information we process
+	'	from the file downloaded from the bank
+	'	Spreadsheet variables
+	Dim row		:	row = 1			'first row to report transactions from download
+	Dim Status
+	Dim Memo
+	Dim TrnType 
+	Dim DPosted 
+	Dim Amount
+	Dim CheckNo 
+	Dim Name
+	
+	' set up spreadsheet for output of transactions 
+	Dim objExcel	: Set objExcel = CreateObject("Excel.Application")
+	Dim objWorkbook	'as Excel.workbook	
+	Set objWorkbook = objExcel.Workbooks.Add()
+	Dim objWorksheet 'as Excel.Worksheet 
+	Set objWorksheet = objExcel.ActiveWorkbook.Worksheets(1)
+	
+	objWorksheet.Cells(row,1).value = "Bank Account Name:  " &amp; BRBankAccountName
+	objWorksheet.Range("A1:A1").Font.Bold = True
+	objWorksheet.Range("A1:A1").Font.Size = 14
+	
+	
+	row = 3
+	objWorksheet.Cells(row,1).value = "Type"
+	objWorksheet.Cells(row,2).value = "Date Cleared"
+	objWorksheet.Cells(row,3).value = "Debit Amount"
+	objWorksheet.Cells(row,4).value = "Credit Amount"
+	objWorksheet.Cells(row,5).value = "Check Number"
+	objWorksheet.Cells(row,6).value = "Memo"
+	objWorksheet.Cells(row,7).value = "Name"
+	objWorksheet.Cells(row,8).value = "Status"
+	
+	objWorksheet.Rows(row).font.bold = True
+	
+	objWorksheet.Name = "Transactions"
+	objWorksheet.Columns("C").NumberFormat = "#,###.00;[Red](#,###.00);0.00"
+	objWorksheet.Columns("D").NumberFormat = "#,###.00;[Red](#,###.00);0.00"
+	objWorksheet.Range("A4").Select
+	objExcel.ActiveWindow.FreezePanes=True
+	
+	'-----------------------------------------------------------------------------------
+	'In this section we see if there is already a download file saved with the BR statement, 
+	'and if so, we use it. Otherwise, we ask for it by browsing the file system.
+	
+	
+	' --If we find the download file as an attachment, then we save it to the file system so we can open
+	'  	as a textstream object.
+	
+	Dim objFSO
+	Set objFSO = CreateObject("Scripting.FileSystemObject")
+	
+	
+	DownloadFilename = MyBRStatement.BankAccount &amp; " - " &amp; DateFormatYYYYMMDD(MyBRStatement.StatementDate)&amp; ".download"
+	
+	'-- Flag to determine whether we are reading the bank file from the file system or Statement Record
+	'	True = file is attached to Statement
+	'	False = file is in file system
+	
+	varInFileFlag = False	
+	On Error Resume Next
+	varInFile = MyBRStatement.Attachments.SaveAsTempFile(DownloadFilename)
+	
+	If (Err.Number = 0) Then
+		varInFileFlag = True	' the QBO file is attached to the Statement Record
+	Else
+		'--Browse for and open a file
+		varInFile = SelectFile()
+		
+	End If
+	
+	On Error Goto 0
+	
+	If (varInFile &lt;&gt; "") Then
+		
+		' open download file and strip out all extraneous data
+		
+		Dim objInFile 	'as Scripting.TextStream
+	
+		Set objInFile = objFSO.GetFile(varInFile).OpenAsTextStream
+		
+		Set objRE = New RegExp
+		' -- Read the input file 
+		strOFX = objInFile.ReadAll
+		objRE.Global= True
+		
+		' -- strip all the new line characters from the file	
+		objRE.Pattern = "[\n\r]+"
+		strOFX = objRE.Replace(strOFX , "")
+		
+		' -- eliminate all extraneous header information before the &lt;OFX&gt; tag
+		objRE.Pattern = "^.+&lt;OFX&gt;"
+		strOFX = objRE.Replace(strOFX,"&lt;OFX&gt;")
+		
+		' --  remove extraneous space characters, the result is where we need to find all the statement transactions
+		objRE.Pattern = " {2,}|\t"
+		strOFX = objRE.Replace(strOFX," ")
+
+		objRE.Pattern= "&lt;OFX&gt;.*?&lt;\/OFX&gt;"
+		Set colMatch = objRE.Execute(strOFX)
+		If(colMatch.Count = 1) Then     ' if there is only one section in the file of the form "&lt;OFX&gt;.*?&lt;\/OFX&gt;", then OK
+			For Each strMatch In colMatch
+				On Error Resume Next
+				BankID_RoutingNumber = Parse(strMatch,"&lt;BankID_RoutingNumber&gt;.*?&lt;")
+				BankID_RoutingNumber = Trim(BankID_RoutingNumber)
+				BankID_RoutingNumber = CStr(RemoveLeadingZeroes(BankID_RoutingNumber))
+				
+				AccountID = Parse(strMatch,"&lt;ACCTID&gt;.*?&lt;")
+				AccountID = Trim(AccountID)
+				AccountID = CStr(RemoveLeadingZeroes(AccountID))
+				
+				'BalAmt = Parse(strMatch,"&lt;LEDGERBAL&gt;&lt;BALAMT&gt;.*?&lt;")
+			
+				If Err.Number &lt;&gt; 0 Then
+					Display Message ("This file does not contain all the Bank ID and/or Account ID information. Proceed with caution!",True)
+					'manually set the BankID_RoutingNumber and AccountID since they are not in the download file
+					BankID_RoutingNumber = BRBankRoutingNumber
+					AccountID = BRABANumber
+				End If
+				On Error Goto 0
+				BalanceDate = DateFormatDDMMYYYY(Left(Parse(strMatch,"&lt;DTASOF&gt;.*?&lt;"),8))
+				'-- get dates from download file and then report the date range of transactions
+				DTSTART = Left(Parse(strMatch,"&lt;DTSTART&gt;.*?&lt;"),8)
+				DTEND = Left(Parse(strMatch,"&lt;DTEND&gt;.*?&lt;"),8)
+				DTSTART = Left(DTSTART,4) &amp; "-" &amp; Mid(DTSTART,5,2) &amp; "-" &amp; Right (DTSTART,2)
+				DTEND = Left(DTEND,4) &amp; "-" &amp; Mid(DTEND,5,2) &amp; "-" &amp; Right (DTEND,2)
+				DisplayMessage "File contains bank transactions between " &amp; CDate(DTSTART) &amp; " and " &amp; CDate(DTEND) , True
+				If (CDate(DTEND) &gt; CDate(StatementGLDate)) Then
+					DisplayMessage "Transactions exist in the download file that are greater than the Activity GLDate on this Statement" , True
+					DisplayMessage "This is not allowed!" , True
+					Error.Raise
+				End If
+				
+			Next
+		Else
+			DisplayMessage "This download file is not compatible with this BOT" ,True
+			
+		End If
+		' -- make sure that we have a match between the QBO file and the Statement record
+		If(BankID_RoutingNumber = BRBankRoutingNumber And AccountID = BRABANumber) Then
+			objRE.Pattern = "&lt;STMTTRN&gt;.*?&lt;\/STMTTRN&gt;"
+			objRE.Global=True
+			Set colMatchesSTMTTRN = objRE.Execute(strOFX)
+			ItemCount = colMatchesSTMTTRN.Count
+			DisplayMessage "Total Number of Statement Items to Process: " &amp; ItemCount, True
+			If ItemCount &lt; 100 Then 
+				DisplayFreq = 10  
+			ElseIf	ItemCount &lt; 1000 Then 
+				DisplayFreq = 50
+			Else
+				DisplayFreq = 100
+			End If
+			For Each STMTTRNMatch In colMatchesSTMTTRN
+				TrnType = Trim(Parse(STMTTRNMatch,"&lt;TRNTYPE&gt;.*?&lt;"))
+				DPosted = DateFormatDDMMYYYY(Left(Parse(STMTTRNMatch,"&lt;DTPOSTED&gt;.*?&lt;"),8))
+				Amount = CCur(Trim(Parse(STMTTRNMatch,"&lt;TRNAMT&gt;.*?&lt;")))
+				If(Amount &lt;= 0) Then
+					Charges = Charges + Amount
+					CrAmount = -Amount
+				Else
+					DrAmount = Amount
+					Deposits = Deposits + Amount
+				End If
+
+				On Error Resume Next
+				Name = Parse(STMTTRNMatch,"&lt;NAME&gt;.*?&lt;")
+				Memo = Parse(STMTTRNMatch,"&lt;MEMO&gt;.*?&lt;")
+				On Error Goto 0
+				
+				If (CDate(DPosted) &lt;= CDate(StatementGLDate)) Then
+					Select Case TrnType
+						
+						Case "CHECK"
+						' extract the 'Check Number' from the STMTTRN string derived from the pattern search
+						CheckNo = CLng(Parse(STMTTRNMatch,"&lt;CHECKNUM&gt;.*?&lt;"))
+						On Error Resume Next
+						MyBRTransaction.LocateByProperty BRBankAccountName ,CheckNo, Null,Null,False,False
+						' the above statement did not yeild a valid match on CheckNo
+						If Err.Number = 0 Then
+							If MyBRTransaction.ReconcileDate Then
+								Status = "This item previously reconciled on statement: " &amp; MyBRTransaction.ReconcileDate
+							Else 
+								If MyBRTransaction.Credit = CrAmount Then
+									MyBRTransaction.Edit	
+									MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
+									MyBRTransaction.ClearDate= DPosted
+									MyBRTransaction.Save
+									Status = "Reconciled"
+								Else
+									Status = "Not Reconciled - Bank Amount is not equal to Activity check amount"
+								End If
+							End If
+						Else
+							Status = "Not Reconciled - " &amp; Err.Description
+						End If
+						On Error Goto 0
+						
+						Case "DEBIT", "DIRECTDEBIT"
+						'the logic for this case is identical to "CHECK" except there is no check no., just amount
+						On Error Resume Next
+						MyBRTransaction.LocateByProperty BRBankAccountName ,Null, Null,-Amount,False,False
+						' the above statement did not yeild a valid match on CheckNo
+						If Err.Number = 0 Then
+							If MyBRTransaction.ReconcileDate Then
+								Status = "This item previously reconciled on statement: " &amp; MyBRTransaction.ReconcileDate
+							Else 
+								If MyBRTransaction.Credit= CrAmount Then
+									MyBRTransaction.Edit	
+									MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
+									MyBRTransaction.ClearDate= DPosted
+									MyBRTransaction.Save
+									Status = "Reconciled"
+								Else
+									Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+								End If
+							End If
+						Else
+							Status = "Not Reconciled - " &amp; Err.Description
+						End If
+						On Error Goto 0
+						
+						Case "CREDIT" , "DEP"
+						On Error Resume Next
+						MyBRTransaction.LocateByProperty BRBankAccountName ,Null, Amount,Null,False,False
+						' the above statement did not yeild a valid match on CheckNo
+						If Err.Number = 0 Then
+							If MyBRTransaction.ReconcileDate Then
+								Status = "This item previously cleared on statement: " &amp; MyBRTransaction.ReconcileDate
+							Else 
+								If MyBRTransaction.Debit= DrAmount Then
+									MyBRTransaction.Edit	
+									MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
+									
+									MyBRTransaction.ClearDate= DPosted
+									MyBRTransaction.Save
+									Status = "Reconciled"
+								Else
+									Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+								End If
+							End If
+						Else
+							Status = "Not Reconciled - " &amp; Err.Description
+						End If
+						On Error Goto 0	
+						
+						Case Else
+						Status = "Not Reconciled"
+						
+					End Select		
+					
+					'place data in spreadsheet
+					row = row + 1
+					objworksheet.Cells(row,1).value = TrnType
+					objworksheet.Cells(row,2).value = DPosted
+					objworksheet.Cells(row,3).value = DrAmount
+					objworksheet.Cells(row,4).value = CrAmount
+					objworksheet.Cells(row,5).value = CheckNo
+					objworksheet.Cells(row,6).value = Memo
+					objworksheet.Cells(row,7).value = Name
+					objworksheet.Cells(row,8).value = Status
+					
+					' Clear variables for next transaction from download file
+					TrnType = ""
+					DPosted = ""
+					Amount = 0
+					CrAmount = 0
+					DrAmount = 0
+					CheckNo = ""
+					Memo = ""
+					Name = ""
+					Status = ""
+					ItemsProcessed = ItemsProcessed +1
+					If ItemsProcessed Mod DisplayFreq = 0 Then
+						DisplayMessage "Statement Items Processed: " &amp;ItemsProcessed &amp; "/" &amp; ItemCount , False
+					End If
+					
+				Else
+					DisplayMessage "Dates in this file do not appear to be compatible with the Statement GL Date",True
+					
+					Err.Raise 62000,"BOT","Dates in this file do not appear to be compatible with the Statement GL Date"
+				End If	
+				
+			Next
+			
+			objWorksheet.Cells(2,1).value = "Date of reconciliation file: " &amp; BalanceDate
+			objWorksheet.Columns("B:H").AutoFit()
+			'objWorksheet.Range("A3:H3").AutoFilter 1, "CHECK" ,,,True 
+			objWorksheet.Range("A3:H3").AutoFilter 1,  ,,,True 
+			objWorksheet.Cells(row + 1,3).Formula = "=subtotal(9,C4:C"&amp; CStr(row) &amp; ")" 
+			objWorksheet.Cells(row + 1,4).Formula = "=subtotal(9,D4:D"&amp; CStr(row) &amp; ")" 
+			
+			Dim tbl 'as Excel.ListObject
+			Set tbl = objWorksheet.ListObjects.Add  
+			tbl.TableStyle= "TableStyleMedium15"
+			'-----------------------------------------------------------------------------------
+			' This object is used to do time manipulation and create a time stamp that is added to
+			' the filename stored with the electronic copy of the bank reconciliation
+			Dim objDateTime  'as WbemScripting.SWbemDateTime
+			Set objDateTime = CreateObject("WbemScripting.SWbemDateTime") 
+
+			objDateTime.SetVarDate Now
+			DateTime = Left(objDateTime.Value,14)
+			
+			' This section finds the temp directory in AppData and stores the spreadsheet in this folder temporairly before
+			' attaching to the Statement in Activity
+			' -- Create the %LOCALAPPDATA%\nQativ folder and use it for temp storage
+			Dim tempfolder
+			Dim objShell ' as WScript.WshShell
+						
+			Set objShell = CreateObject("WScript.Shell")
+			' -- Create the %LOCALAPPDATA%\nQativ folder and use it for temp storage
+
+			Dim strLocalAppfolder
+			strLocalAppFolder = objShell.ExpandEnvironmentStrings("%LOCALAPPDATA%")
+			If Not (objFSO.FolderExists(strLocalAppFolder &amp; "\nQativ")) Then
+				objFSO.CreateFolder(strLocalAppFolder &amp; "\nQativ")
+			End If
+			
+			tempfolder = objShell.ExpandEnvironmentStrings("%LOCALAPPDATA%\nQativ")
+
+			Set objShell = Nothing
+
+			Dim FileName
+			FileName = tempfolder &amp; "\banktransaction" &amp; DateTime &amp;".xlsx"
+			objWorkbook.SaveAs (FileName)
+			objWorkbook.Close
+			objexcel.Workbooks.Close
+			objexcel.Application.Quit
+			
+			MyBRStatement.Attachments.Add FileName
+			objFSO.DeleteFile FileName
+		
+			MyBRStatement.TotalCharges = - Charges
+			MyBRStatement.TotalDeposits = Deposits
+			MyBRStatement.Save
+			'Write out file to the Statement Record
+			If varInFileFlag = False Then
+				DownloadFilename = objFSO.BuildPath(objFSO.GetParentFolderName(varInFile),DownloadFilename)
+				objInFile.Close
+				'On Error Resume Next
+				objFSO.MoveFile varInFile,DownloadFilename
+				
+				MyBRStatement.Attachments.Add DownloadFilename
+				objFSO.DeleteFile DownloadFilename ',True
+				'On Error Goto 0
+			End If
+			DisplayMessage "Bank transaction reconciliation with Activity is finished.", True
+		Else			
+			DisplayMessage "Bank transaction file does not match the bank account on this statement" ,True
+			objInFile.Close
+		End If
+	Else
+		DisplayMessage "No bank download file selected",True
+		
+	End If
+Else
+	DisplayMessage ExitDescription,True
+End If
+
+
+On Error Resume Next
+objWorkbook.Close False
+objExcel.Workbooks.Close
+objexcel.Application.save
+Set objexcel = Nothing
+Set objWorksheet = Nothing
+Set objInFile = Nothing
+Set objRE = Nothing
+Set objFSO = Nothing
+Set MyBRStatement = Nothing
+Set MyBRTransaction = Nothing
+
+'+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Function DateFormatDDMMYYYY(DateString)
+	DateFormatDDMMYYYY = Mid(DateString,5,2) &amp; "/" &amp; Right(DateString,2) &amp; "/" &amp; Left(DateString,4)
+End Function
+
+Function DateFormatYYYYMMDD(DateStringUTC)
+	Dim dateLocal
+	dateLocal = CDate(DateStringUTC)
+	DateFormatYYYYMMDD = Year(dateLocal) &amp; "-" &amp; Right("0" &amp; Month(dateLocal),2) &amp; "-" &amp; Right("0" &amp; Day(dateLocal),2)
+End Function
+
+Function Parse(objMatch,Pattern)
+	Dim BegChr
+	Dim EndChr
+	Dim ObjRExType
+	
+	Set ObjRExType = New RegExp
+	objRExType.Global= False
+	objRExType.Pattern= Pattern
+	Set colMatch = objRExType.Execute(objMatch.value)
+	
+	' extract the type from the STMTTRN string derived from the pattern search
+	
+	BegChr = InStr(1,colMatch.Item(0).value,"&gt;",1)+1
+	EndChr = InStr(BegChr,colMatch.Item(0).value,"&lt;",1) 
+	Parse = Mid(colMatch.Item(0).value,BegChr,EndChr-BegChr)
+	
+End Function
+
+
+
+
+Function SelectFile( )
+	' File Browser via HTA
+	' Author:   Rudi Degrande, modifications by Denis St-Pierre and Rob van der Woude
+	' Features: Works in Windows Vista and up (Should also work in XP).
+	'           Fairly fast.
+	'           All native code/controls (No 3rd party DLL/ XP DLL).
+	' Caveats:  Cannot define default starting folder.
+	'           Uses last folder used with MSHTA.EXE stored in Binary in [HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32].
+	'           Dialog title says "Choose file to upload".
+	' Source:   https://social.technet.microsoft.com/Forums/scriptcenter/en-US/a3b358e8-15ae-4ba3-bca5-ec349df65ef6/windows7-vbscript-open-file-dialog-box-fakepath?forum=ITCG
+	
+	Dim objExec, strMSHTA, wshShell
+	
+	SelectFile = ""
+	
+	' For use in HTAs as well as "plain" VBScript:
+	strMSHTA = "mshta.exe ""about:" &amp; "&lt;" &amp; "input type=file id=FILE&gt;" _
+	&amp; "&lt;" &amp; "script&gt;FILE.click();new ActiveXObject('Scripting.FileSystemObject')" _
+	&amp; ".GetStandardStream(1).WriteLine(FILE.value);close();resizeTo(0,0);" &amp; "&lt;" &amp; "/script&gt;"""
+	' For use in "plain" VBScript only:
+	' strMSHTA = "mshta.exe ""about:&lt;input type=file id=FILE&gt;" _
+	'          &amp; "&lt;script&gt;FILE.click();new ActiveXObject('Scripting.FileSystemObject')" _
+	'          &amp; ".GetStandardStream(1).WriteLine(FILE.value);close();resizeTo(0,0);&lt;/script&gt;"""
+	
+	Set wshShell = CreateObject( "WScript.Shell" )
+	Set objExec = wshShell.Exec( strMSHTA )
+	
+	SelectFile = objExec.StdOut.ReadLine( )
+	
+	Set objExec = Nothing
+	Set wshShell = Nothing
+End Function
+
+Function RemoveLeadingZeroes(ByVal str)
+	Dim tempStr
+	tempStr = str
+	While Left(tempStr,1) = "0" And tempStr &lt;&gt; ""
+		tempStr = Right(tempStr,Len(tempStr)-1)
+	Wend
+	RemoveLeadingZeroes = tempStr
+End Function
+
+Sub IsStatementClosed (Statement,Flag,Description)
+	If (Statement.IsClosed) Then
+		Flag = 61001
+		Description = "Bank Statement Selected is Closed"
+	End If
+	
+End Sub
+
+Sub IsStatementLocked (Statement,Flag,Description)
+	'Check To make sure we can write To the Statement... otherwise Exit
+	On Error Resume Next
+	Statement.Edit
+	If Err.Number &lt;&gt; 0 Then
+		Flag = Err.Number
+		Description = Err.Description
+	End If
+	On Error Goto 0
+End Sub
+
+Sub DisplayMessage (MessageStr , DisplayMsgBox)
+	If (Internal) Then
+		RecordLoop.AddMessage MessageStr
+	Else
+		If (DisplayMsgBox)  Then MsgBox MessageStr : End If
+	End If
+End Sub			</MacroScript>
+		<MacroScriptInit/>
+		<MacroScriptFinal/>
+		<AccessControl Value="All"/>
+		<Permissions/>
+		<Obsolete Value="False"/>
+		<CustomData>
+			<Field Name="Sunday" Value="False"/>
+			<Field Name="Monday" Value="False"/>
+			<Field Name="Tuesday" Value="False"/>
+			<Field Name="Wednesday" Value="False"/>
+			<Field Name="Thursday" Value="False"/>
+			<Field Name="Friday" Value="False"/>
+			<Field Name="Saturday" Value="False"/>
+		</CustomData>
+		<Memo/>
+		<CreateDate Value="2017-02-02T10:47:56.400"/>
+		<CreateUser Value="sgarza"/>
+		<ReviseDate Value="2017-02-02T14:30:03.790"/>
+		<ReviseUser Value="mcrossnoe"/>
+	</data>
+</XML>
