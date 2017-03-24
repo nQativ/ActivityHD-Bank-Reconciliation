@@ -1,16 +1,18 @@
 <XML ID="{4AE0010F-B62D-4A27-B137-74F578498072}" Type="Bots">
-	<data Code="Bank Reconciliation BOT " ID="{C955A0D0-BF7D-4D4B-AF33-999BA85C0EEC}">
-		<Name Value="Bank Reconciliation BOT "/>
-		<Description Value="Bank Reconciliation QBO "/>
+	<data Code="Bank Reconciliation" ID="{0A2A1F79-51E6-49C6-A1C9-7FD506A57E8D}">
+		<Name Value="Bank Reconciliation"/>
+		<Description Value="Reconcile transactions in BankRec from downloaded bank file"/>
 		<MacroType Value="Record Loop"/>
-		<EnableResults Value="True"/>
+		<EnableResults Value="False"/>
 		<Shortcut/>
 		<RecordType/>
 		<RunFrom Value="Bank Statements (Bank Reconciliation)">
 			<item Code="Bank Statements (Bank Reconciliation)" ID="{CC93E67E-7110-4319-AD99-E61449437D00}" Assigned="True"/>
 		</RunFrom>
 		<Using/>
-		<MacroScript>' Macro Name: Bank Reconciliation
+		<MacroScript/>
+		<MacroScriptInit/>
+		<MacroScriptFinal> Bank Reconciliation
 ' Version 1.0
 ' Author: Marvin Crossnoe
 ' Date:  2016-12-17
@@ -86,11 +88,11 @@ If(Internal) Then
 Else
 	' -- This section is for external run only
 	Set MyActivity = CreateObject("ActivityOAS.Activity")
-	MyActivity.ServerAddress = "Appserver3"
-	Set Company = MyActivity.Companies("Demo MRC")
+	MyActivity.ServerAddress = "CustAct1"
+	Set Company = MyActivity.Companies("Cal Expo - Test")
 	Company.Connect
 	Set MyBRStatement = Company.BankReconciliation.BRStatement
-	MyBRStatement.Locate("MRXNO Peoples Bank - 2016-11-30")
+	MyBRStatement.Locate("Payroll - February 2017")
 End If
 
 '====================================================================================
@@ -221,7 +223,8 @@ If(ExitFlag = 0) Then   ' ExitFlag is non zero if the statement is locked or clo
 	Set objFSO = CreateObject("Scripting.FileSystemObject")
 	
 	
-	DownloadFilename = MyBRStatement.BankAccount &amp; " - " &amp; DateFormatYYYYMMDD(MyBRStatement.StatementDate)&amp; ".download"
+	'DownloadFilename = MyBRStatement.BankAccount &amp; " - " &amp; DateFormatYYYYMMDD(MyBRStatement.StatementDate)&amp; ".download"
+	DownloadFilename = MyBRStatement.BankAccount &amp; " - " &amp; "02282017" &amp; ".download"
 	
 	'-- Flag to determine whether we are reading the bank file from the file system or Statement Record
 	'	True = file is attached to Statement
@@ -374,14 +377,18 @@ If(ExitFlag = 0) Then   ' ExitFlag is non zero if the statement is locked or clo
 							If MyBRTransaction.ReconcileDate Then
 								Status = "This item previously reconciled on statement: " &amp; MyBRTransaction.ReconcileDate
 							Else 
-								If MyBRTransaction.Credit= CrAmount Then
-									MyBRTransaction.Edit	
-									MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
-									MyBRTransaction.ClearDate= DPosted
-									MyBRTransaction.Save
-									Status = "Reconciled"
+								If MyBRTransaction.Date &gt; MyBRStatement.StatementDate Then
+									Status = "Not Reconciled - GL Transaction date," &amp; MyBRTransaction.Date &amp; ", is AFTER statement date"
 								Else
-									Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+									If MyBRTransaction.Credit= CrAmount Then
+										MyBRTransaction.Edit	
+										MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
+										MyBRTransaction.ClearDate= DPosted
+										MyBRTransaction.Save
+										Status = "Reconciled"
+									Else
+										Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+									End If
 								End If
 							End If
 						Else
@@ -397,15 +404,19 @@ If(ExitFlag = 0) Then   ' ExitFlag is non zero if the statement is locked or clo
 							If MyBRTransaction.ReconcileDate Then
 								Status = "This item previously cleared on statement: " &amp; MyBRTransaction.ReconcileDate
 							Else 
-								If MyBRTransaction.Debit= DrAmount Then
-									MyBRTransaction.Edit	
-									MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
-									
-									MyBRTransaction.ClearDate= DPosted
-									MyBRTransaction.Save
-									Status = "Reconciled"
+								If MyBRTransaction.Date &gt; MyBRStatement.StatementDate Then
+									Status = "Not Reconciled - GL Transaction date," &amp; MyBRTransaction.Date &amp; ", is AFTER statement date"
 								Else
-									Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+									If MyBRTransaction.Debit= DrAmount Then
+										MyBRTransaction.Edit	
+										MyBRTransaction.Statement= DateFormatYYYYMMDD(MyBRStatement.StatementDate)
+										
+										MyBRTransaction.ClearDate= DPosted
+										MyBRTransaction.Save
+										Status = "Reconciled"
+									Else
+										Status = "Not Reconciled - Bank Amount is not equal to Activity amount"
+									End If
 								End If
 							End If
 						Else
@@ -639,25 +650,14 @@ Sub DisplayMessage (MessageStr , DisplayMsgBox)
 	Else
 		If (DisplayMsgBox)  Then MsgBox MessageStr : End If
 	End If
-End Sub			</MacroScript>
-		<MacroScriptInit/>
-		<MacroScriptFinal/>
+End Sub</MacroScriptFinal>
 		<AccessControl Value="All"/>
 		<Permissions/>
 		<Obsolete Value="False"/>
-		<CustomData>
-			<Field Name="Sunday" Value="False"/>
-			<Field Name="Monday" Value="False"/>
-			<Field Name="Tuesday" Value="False"/>
-			<Field Name="Wednesday" Value="False"/>
-			<Field Name="Thursday" Value="False"/>
-			<Field Name="Friday" Value="False"/>
-			<Field Name="Saturday" Value="False"/>
-		</CustomData>
 		<Memo/>
-		<CreateDate Value="2017-02-02T10:47:56.400"/>
-		<CreateUser Value="sgarza"/>
-		<ReviseDate Value="2017-02-02T14:30:03.790"/>
-		<ReviseUser Value="mcrossnoe"/>
+		<CreateDate Value="2017-03-17T17:16:33.940"/>
+		<CreateUser Value="pjohnston"/>
+		<ReviseDate Value="2017-03-17T17:16:33.940"/>
+		<ReviseUser Value="pjohnston"/>
 	</data>
 </XML>
